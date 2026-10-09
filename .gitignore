@@ -14,3 +14,7 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# рабочие данные проекта (id страниц, Figma, промпты) — не публикуем
+kubok-mirror/profile.json
+kubok-mirror/docs/prompt-*.md
