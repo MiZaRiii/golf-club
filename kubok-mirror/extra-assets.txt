@@ -1,0 +1,4 @@
+# Ресурсы, которые Тильда подгружает динамически (по одному URL на строку)
+https://static.tildacdn.com/js/tilda-phone-mask-1.1.min.js
+https://static.tildacdn.com/css/tilda-zero-form-errorbox.min.css
+https://static.tildacdn.com/css/tilda-zero-form-horizontal.min.css

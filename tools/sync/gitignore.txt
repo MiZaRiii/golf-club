@@ -1,0 +1,16 @@
+# зеркало сайта: пересобирается kubok-mirror/sync.py
+kubok-mirror/index.html
+kubok-mirror/assets/
+*.orig
+
+# тестовые снимки страницы и сгенерированные файлы
+kubok-mirror/test/live*.html
+kubok-mirror/tools/zero-gen/out/
+
+# служебное
+tools/sync/*.log
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,390 @@
+<!-- Слайдер амбассадоров (Кубок Синергии). Вставить в блок T123 ПОСЛЕ блоков «Амбассадоры» (сцена) и «Карточки амбассадоров».
+     Настройки (необязательно) задаются перед скриптом:  <script>
+/*!
+ * Слайдер амбассадоров (Кубок Синергии): сцена в одном Zero-блоке, данные в карточках другого Zero-блока.
+ * Описание, классы и настройки: docs/ambassadors-slider.md
+ *
+ * Настройки (необязательно), задаются ДО скрипта или классом на .uc-amb-slide:
+ *   window.UC_AMBASSADORS = { loop: true, duration: 600, easing: "cubic-bezier(.22,1,.36,1)", shift: 40 };
+ *   класс uc-amb-loop на группе Slide = зацикливание (удобно включать прямо в Zero).
+ */
+(function () {
+  "use strict";
+  if (window.ucAmbassadors) return;
+
+  var USER = window.UC_AMBASSADORS || {};
+  var CFG = {
+    loop: !!USER.loop,                                       // бесконечный слайдер
+    duration: USER.duration != null ? USER.duration : 600,
+    easing: USER.easing || "cubic-bezier(.22, 1, .36, 1)",   // ease-out: быстрый старт, плавное замедление
+    shift: USER.shift != null ? USER.shift : 40,             // сдвиг спикера и ФИО, px
+    hideCards: USER.hideCards !== false,                     // прятать блок с карточками на сайте
+    swipe: USER.swipe !== false,                             // «живой» свайп на мобильном
+    dragDistance: USER.dragDistance || 180,                  // сколько px пальца = полный переход
+    commitProgress: USER.commitProgress != null ? USER.commitProgress : 0.35, // доля, после которой отпускание завершает переход
+    commitVelocity: USER.commitVelocity != null ? USER.commitVelocity : 0.45, // px/мс: быстрый «флик» тоже завершает переход
+    mobileBreakpoint: USER.mobileBreakpoint || 1200,
+    personPositionMobile: USER.personPositionMobile || "50% 0", // привязка спикера в рамке на мобильной: центр, верх
+    thinLines: USER.thinLines !== false,                     // линии 1px в тексте (.uc-amb-bio) рисовать в 0.5px
+    respectReducedMotion: USER.respectReducedMotion === true,  // по умолчанию анимация есть всегда; true = уважать системную настройку
+  };
+
+  var Q = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
+  var live = function (el) { return !el.closest(".uc-amb-ghost"); };   // не призрак
+  var reduce = CFG.respectReducedMotion && window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var isMobile = function () { return window.innerWidth < CFG.mobileBreakpoint; };
+  var clamp = function (v) { return v < 0 ? 0 : v > 1 ? 1 : v; };
+  var state = { index: 0, cards: [], slide: null, root: null, tr: null };
+
+  // ---------- кривая easing (cubic-bezier) ----------
+  function bezier(x1, y1, x2, y2) {
+    function cx(t) { return 3 * x1 * t * (1 - t) * (1 - t) + 3 * x2 * t * t * (1 - t) + t * t * t; }
+    function cy(t) { return 3 * y1 * t * (1 - t) * (1 - t) + 3 * y2 * t * t * (1 - t) + t * t * t; }
+    function dx(t) { return 3 * x1 * (1 - t) * (1 - t) + 6 * (x2 - x1) * t * (1 - t) + 3 * (1 - x2) * t * t; }
+    return function (x) {
+      if (x <= 0) return 0; if (x >= 1) return 1;
+      var t = x, i;
+      for (i = 0; i < 8; i++) { var e = cx(t) - x; if (Math.abs(e) < 1e-4) break; var d = dx(t); if (Math.abs(d) < 1e-6) break; t -= e / d; }
+      if (t < 0 || t > 1) { var lo = 0, hi = 1; t = x; for (i = 0; i < 20; i++) { if (cx(t) < x) lo = t; else hi = t; t = (lo + hi) / 2; } }
+      return cy(t);
+    };
+  }
+  var ease = (function () {
+    var m = /cubic-bezier\(\s*([\d.\-]+)\s*,\s*([\d.\-]+)\s*,\s*([\d.\-]+)\s*,\s*([\d.\-]+)\s*\)/.exec(CFG.easing);
+    return m ? bezier(+m[1], +m[2], +m[3], +m[4]) : bezier(0, 0, 0.58, 1);
+  })();
+
+  // ---------- чтение карточек ----------
+  function imgSrc(el) {
+    if (!el) return "";
+    var img = el.querySelector("img");
+    return img ? (img.getAttribute("src") || img.getAttribute("data-original") || "") : "";
+  }
+  function html(el) {
+    if (!el) return "";
+    var a = el.querySelector(".tn-atom");
+    return a ? a.innerHTML : el.innerHTML;
+  }
+  function readCard(card) {
+    var f = function (cls) { return card.querySelector("." + cls); };
+    return {
+      bg: imgSrc(f("uc-amb-c-bg")), person: imgSrc(f("uc-amb-c-person")),
+      name: html(f("uc-amb-c-name")), title: html(f("uc-amb-c-title")),
+      // абзацы описания: uc-amb-c-desc (по порядку в карточке, сколько угодно); поддержаны и старые uc-amb-c-desc1 / uc-amb-c-desc2
+      descs: Q(".uc-amb-c-desc, .uc-amb-c-desc1, .uc-amb-c-desc2", card).map(html),
+    };
+  }
+
+  // ---------- элементы сцены ----------
+  function stage() {
+    var root = state.root || document;
+    var g = function (cls) { return Q(".tn-elem." + cls + ", .tn-group." + cls, root).filter(live); };
+    var info = g("uc-amb-info").filter(visible)[0] || null;
+    return {
+      bg: g("uc-amb-bg"), person: g("uc-amb-person"), nameOv: g("uc-amb-name-ov"), nameM: g("uc-amb-name"),
+      title: g("uc-amb-title"), bio: g("uc-amb-bio").filter(visible)[0] || null,
+      counter: g("uc-amb-counter"), prev: g("uc-amb-prev"), next: g("uc-amb-next"), info: info,
+      host: info ? info.querySelector(".tn-molecule") || info : null,   // неподвижный слой для призраков текста
+    };
+  }
+  // Абзацы описания: каждая обёртка .uc-amb-descs = один абзац. Абзацев в карточке больше, чем обёрток в сцене,
+  // — недостающие обёртки создаются копией последней (с её линиями и отступами), лишние прячутся.
+  function descSlots() {
+    var root = state.root || document;
+    var wraps = Q(".tn-group.uc-amb-descs", root).filter(live);
+    if (wraps.length) return wraps.map(function (w) { return { wrap: w, el: w.querySelector(".uc-amb-desc, .uc-amb-desc1, .uc-amb-desc2") }; });
+    return Q(".tn-elem.uc-amb-desc, .tn-elem.uc-amb-desc1, .tn-elem.uc-amb-desc2", root).filter(live).map(function (el) { return { wrap: null, el: el }; });
+  }
+  function ensureDescs(n) {
+    var slots = descSlots();
+    var last = slots[slots.length - 1];
+    if (!last || !last.wrap) return slots;
+    while (slots.length < n) {
+      var c = last.wrap.cloneNode(true);
+      c.classList.add("uc-amb-desc-clone"); c.style.display = "";
+      last.wrap.parentNode.insertBefore(c, last.wrap.nextSibling);
+      last = { wrap: c, el: c.querySelector(".uc-amb-desc, .uc-amb-desc1, .uc-amb-desc2") };
+      slots.push(last);
+    }
+    return slots;
+  }
+  function setImg(el, src) {
+    var img = el.querySelector("img"); if (!img || !src) return;
+    img.removeAttribute("srcset"); img.setAttribute("src", src); img.setAttribute("data-original", src);
+  }
+  function setText(el, h) { var a = el && el.querySelector(".tn-atom"); if (a) a.innerHTML = h; }
+  function visible(el) { return el.offsetWidth > 0 && el.offsetHeight > 0; }
+  function overlayName(h) { return /<br/i.test(h) ? h : String(h).replace(/\s+/, "<br>"); }
+  function plainName(h) { return String(h).replace(/<br\s*\/?>/gi, " "); }
+  function isEmpty(h) { return !h || !String(h).replace(/<[^>]*>|&nbsp;|\s/g, ""); }
+
+  // Тексты карточки -> сцена (без анимации)
+  function applyText(data) {
+    var s = stage();
+    s.nameOv.forEach(function (el) { setText(el, overlayName(data.name)); });
+    s.nameM.forEach(function (el) { setText(el, plainName(data.name)); });
+    s.title.forEach(function (el) { setText(el, data.title); });
+    ensureDescs(data.descs.length).forEach(function (slot, k) {
+      var h = data.descs[k] || "", hide = isEmpty(h);
+      setText(slot.el, h);
+      // пустой абзац прячем вместе с обёрткой (линия и отступ), чтобы не оставалась лишняя линия
+      if (slot.el) slot.el.style.display = hide ? "none" : "";
+      if (slot.wrap) slot.wrap.style.display = hide ? "none" : "";
+    });
+    thinLines();
+  }
+  // Содержимое карточки -> сцена целиком (без анимации)
+  function applyContent(data) {
+    var s = stage();
+    s.bg.forEach(function (el) { setImg(el, data.bg); });
+    s.person.forEach(function (el) { setImg(el, data.person); });
+    applyText(data);
+  }
+
+  // Линии 1px внутри текста -> 0.5px (на мобильной Zero масштабирует 1px, и линии выглядят толстыми)
+  function thinLines() {
+    if (!CFG.thinLines) return;
+    Q(".uc-amb-bio .tn-molecule", state.root || document).forEach(function (m) {
+      ["top", "bottom"].forEach(function (side) {
+        var k = "border-" + side + "-width";
+        m.style.removeProperty(k);
+        var w = parseFloat(getComputedStyle(m)[side === "top" ? "borderTopWidth" : "borderBottomWidth"]) || 0;
+        if (w > 0 && w <= 1.5) m.style.setProperty(k, "0.5px", "important");
+      });
+    });
+  }
+
+  // ---------- переход с прогрессом p (0..1): клик и живой свайп используют один код ----------
+  // Призрак: копия элемента со СТАРЫМ содержимым поверх настоящего (оно уже обновлено), position:absolute.
+  // host = неподвижный слой: призрак остаётся там, где был старый текст, даже если новая раскладка сдвигается
+  // (иначе высокий старый текст «съезжает» вместе с обёрткой под нижнюю линию).
+  function ghostOf(el, host) {
+    var g = el.cloneNode(true);
+    g.classList.add("uc-amb-ghost");
+    var set = function (k, v) { g.style.setProperty(k, v, "important"); };
+    var left = el.offsetLeft, top = el.offsetTop;
+    if (host) {
+      var r = el.getBoundingClientRect(), h = host.getBoundingClientRect();
+      left = r.left - h.left - host.clientLeft; top = r.top - h.top - host.clientTop;
+    }
+    set("position", "absolute"); set("left", left + "px"); set("top", top + "px"); set("right", "auto"); set("bottom", "auto");
+    set("width", el.offsetWidth + "px"); set("height", el.offsetHeight + "px"); set("min-height", "0"); set("margin", "0");
+    set("pointer-events", "none"); set("z-index", "5"); set("transform", "none");
+    if (host) host.appendChild(g); else el.parentNode.insertBefore(g, el.nextSibling);
+    return g;
+  }
+
+  function begin(target, dir) {
+    var data = readCard(state.cards[target]), old = readCard(state.cards[state.index]);
+    var s = stage(), layers = [], sh = CFG.shift;
+    // 1) призраки со старым содержимым (до изменения раскладки)
+    // kind: x = фон (кросс-фейд), mv = спикер/ФИО (движение + прозрачность), fd = текст (только прозрачность)
+    var add = function (list, kind, host) {
+      list.forEach(function (el) { if (visible(el)) layers.push({ g: ghostOf(el, host), el: el, kind: kind }); });
+    };
+    add(s.bg, "x"); add(s.person, "mv"); add(s.nameOv, "mv");
+    add(s.nameM, "mv", s.host);
+    if (s.bio) add([s.bio], "fd", s.host);                 // весь текстовый блок одним слоем: заголовок, абзацы, линии
+    else { add(s.title, "fd", s.host); add(descSlots().map(function (d) { return d.el; }).filter(Boolean), "fd", s.host); }
+    // 2) новое содержимое в настоящие элементы
+    applyContent(data);
+
+    var t = { target: target, dir: dir, p: 0, layers: layers, settling: false, finished: false, toP: 1 };
+    t.apply = function (p) {
+      t.p = p;
+      // текст: старый гаснет в первой половине, новый проявляется с небольшим наложением — без «каши» из двух текстов
+      var outT = 1 - clamp(p / 0.6), inT = clamp((p - 0.3) / 0.7);
+      layers.forEach(function (l) {
+        var gs = l.g.style, es = l.el.style;
+        if (l.kind === "mv") {
+          gs.opacity = String(1 - p);
+          gs.setProperty("transform", "translate3d(" + (-dir * sh * p) + "px,0,0)", "important");
+          es.opacity = String(p); es.transform = "translate3d(" + (dir * sh * (1 - p)) + "px,0,0)";
+        } else if (l.kind === "fd") { gs.opacity = String(outT); es.opacity = String(inT); }
+        else gs.opacity = String(1 - p);
+      });
+    };
+    t.cleanup = function () {
+      layers.forEach(function (l) { if (l.g.parentNode) l.g.parentNode.removeChild(l.g); l.el.style.opacity = ""; l.el.style.transform = ""; });
+    };
+    t.commit = function () { t.cleanup(); state.index = target; state.tr = null; updateUi(); };
+    t.abort = function () { t.cleanup(); applyContent(old); state.tr = null; updateUi(); };
+    t.apply(0);
+    return t;
+  }
+
+  // Мгновенно завершить переход (для быстрых повторных нажатий)
+  function finish(t) {
+    if (!t || t.finished) return;
+    t.finished = true; clearTimeout(t.safety);
+    t.apply(t.toP); if (t.toP === 1) t.commit(); else t.abort();
+  }
+
+  // Довести переход до конца (toP = 1) или вернуть назад (toP = 0) с easing
+  function settle(t, toP, duration) {
+    t.settling = true; t.toP = toP;
+    var p0 = t.p, t0 = null, dur = reduce || document.hidden ? 0 : duration;
+    if (dur <= 0) { finish(t); return; }
+    t.safety = setTimeout(function () { finish(t); }, dur + 400);
+    (function frame(now) {
+      if (t.finished) return;
+      if (t0 == null) t0 = now;
+      var k = Math.min(1, (now - t0) / dur);
+      t.apply(p0 + (toP - p0) * ease(k));
+      if (k < 1) requestAnimationFrame(frame); else finish(t);
+    })(performance.now());
+  }
+
+  function updateUi(index) {
+    var s = stage(), n = state.cards.length, i = index != null ? index : state.index;
+    var cur = (i + 1 < 10 ? "0" : "") + (i + 1), tot = (n < 10 ? "0" : "") + n;
+    s.counter.forEach(function (el) { setText(el, cur + " / " + tot); });
+    var atStart = !CFG.loop && i === 0, atEnd = !CFG.loop && i === n - 1;
+    s.prev.forEach(function (el) { el.classList.toggle("is-disabled", atStart || n < 2); el.setAttribute("aria-disabled", atStart || n < 2); });
+    s.next.forEach(function (el) { el.classList.toggle("is-disabled", atEnd || n < 2); el.setAttribute("aria-disabled", atEnd || n < 2); });
+  }
+
+  function targetFor(dir, from) {
+    var n = state.cards.length, t = (from != null ? from : state.index) + dir;
+    if (CFG.loop) return (t + n) % n;
+    return t >= 0 && t < n ? t : -1;
+  }
+
+  function go(target, dir, instant) {
+    var n = state.cards.length;
+    if (!n) return;
+    if (instant) { finish(state.tr); applyContent(readCard(state.cards[target])); state.index = target; updateUi(); return; }
+    if (state.tr && !state.tr.settling) return;            // палец ещё ведёт свайп
+    finish(state.tr);                                      // быстрое повторное нажатие: текущий переход сразу к концу
+    if (CFG.loop) target = (target + n) % n; else target = Math.max(0, Math.min(n - 1, target));
+    if (target === state.index) return;
+    var t = begin(target, dir); state.tr = t;
+    updateUi(target);                                      // счётчик и кнопки меняются сразу по нажатию
+    settle(t, 1, CFG.duration);
+  }
+  // шаг от текущей карточки (считается после завершения предыдущего перехода)
+  function step(dir) {
+    if (state.tr && !state.tr.settling) return;
+    finish(state.tr);
+    var t = targetFor(dir); if (t >= 0) go(t, dir);
+  }
+
+  // ---------- резерв высоты текстового блока на мобильной ----------
+  // Навигация (счётчик и кнопки) лежит ниже текста: чтобы она не прыгала при смене карточки, высота блока = по самой высокой карточке.
+  function reserve() {
+    if (state.tr) { scheduleReserve(); return; }
+    var info = stage().info;
+    var mols = info ? [info, info.querySelector(".tn-molecule")].filter(Boolean) : [];
+    mols.forEach(function (e) { e.style.removeProperty("min-height"); });
+    thinLines();
+    if (!info || !isMobile()) return;
+    var cur = state.index, max = info.offsetHeight;
+    state.cards.forEach(function (c) { applyText(readCard(c)); max = Math.max(max, info.offsetHeight); });
+    applyText(readCard(state.cards[cur]));
+    mols.forEach(function (e) { e.style.setProperty("min-height", max + "px", "important"); });
+  }
+  var reserveTimer = null, lastWidth = 0;
+  function scheduleReserve() { clearTimeout(reserveTimer); reserveTimer = setTimeout(reserve, 200); }
+
+  // ---------- события ----------
+  function bind() {
+    var s = stage();
+    s.next.forEach(function (el) { el.style.cursor = "pointer"; el.setAttribute("role", "button"); el.setAttribute("tabindex", "0"); el.setAttribute("aria-label", "Следующий амбассадор"); });
+    s.prev.forEach(function (el) { el.style.cursor = "pointer"; el.setAttribute("role", "button"); el.setAttribute("tabindex", "0"); el.setAttribute("aria-label", "Предыдущий амбассадор"); });
+    var click = function (dir) { return function (e) { if (e.type === "keydown" && e.key !== "Enter" && e.key !== " ") return; e.preventDefault(); if (this.classList.contains("is-disabled")) return; step(dir); }; };
+    s.next.forEach(function (el) { el.addEventListener("click", click(1)); el.addEventListener("keydown", click(1)); });
+    s.prev.forEach(function (el) { el.addEventListener("click", click(-1)); el.addEventListener("keydown", click(-1)); });
+
+    if (CFG.swipe) {
+      var host = state.slide, x0 = null, y0 = null, t0 = 0, decided = false, tr = null, lastDx = 0;
+      host.addEventListener("touchstart", function (e) {
+        if (e.touches.length !== 1) { x0 = null; return; }
+        if (state.tr && state.tr.settling) finish(state.tr);   // можно листать, не дожидаясь конца анимации
+        if (state.tr) { x0 = null; return; }
+        x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; t0 = Date.now(); decided = false; tr = null; lastDx = 0;
+      }, { passive: true });
+      host.addEventListener("touchmove", function (e) {
+        if (x0 == null) return;
+        var dx = e.touches[0].clientX - x0, dy = e.touches[0].clientY - y0; lastDx = dx;
+        if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+          decided = true;
+          if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+            var dir = dx < 0 ? 1 : -1, target = targetFor(dir);
+            if (target >= 0 && target !== state.index) { tr = begin(target, dir); state.tr = tr; }
+          }
+        }
+        if (tr) tr.apply(clamp((-dx * tr.dir) / CFG.dragDistance));
+      }, { passive: true });
+      var end = function (cancel) {
+        if (tr && state.tr === tr) {
+          var dt = Math.max(1, Date.now() - t0), v = Math.abs(lastDx) / dt;
+          var commit = !cancel && (tr.p >= CFG.commitProgress || (v > CFG.commitVelocity && tr.p > 0.05));
+          if (commit) updateUi(tr.target);
+          settle(tr, commit ? 1 : 0, Math.max(160, CFG.duration * (commit ? 1 - tr.p : tr.p)));
+        }
+        x0 = null; tr = null;
+      };
+      host.addEventListener("touchend", function () { end(false); }, { passive: true });
+      host.addEventListener("touchcancel", function () { end(true); }, { passive: true });
+    }
+    // на телефоне resize бывает от скрытия адресной строки: пересчитываем только при смене ширины
+    window.addEventListener("resize", function () { if (window.innerWidth !== lastWidth) { lastWidth = window.innerWidth; scheduleReserve(); } });
+  }
+
+  function injectCss() {
+    if (document.getElementById("uc-amb-css")) return;
+    var st = document.createElement("style"); st.id = "uc-amb-css";
+    // Zero задаёт opacity на внутреннем слое группы (.tn-molecule), поэтому состояние кнопок переключаем на нём
+    st.textContent =
+      ".uc-amb-prev,.uc-amb-next{opacity:1!important}" +
+      ".uc-amb-prev .tn-molecule,.uc-amb-next .tn-molecule{opacity:1!important;transition:opacity .3s ease}" +
+      ".uc-amb-prev.is-disabled .tn-molecule,.uc-amb-next.is-disabled .tn-molecule{opacity:.3!important}" +
+      ".uc-amb-prev.is-disabled,.uc-amb-next.is-disabled{pointer-events:none}" +
+      ".uc-amb-prev,.uc-amb-next{-webkit-tap-highlight-color:transparent}" +
+      ".uc-amb-ghost{will-change:transform,opacity}" +
+      ".uc-amb-portrait{overflow:hidden}" +
+      ".uc-amb-card--hidden{display:none!important}" +
+      // мобильная: спикер привязан к центру и верху рамки (низ обрезается, голова остаётся); свайп по горизонтали, скролл по вертикали
+      "@media (max-width:" + (CFG.mobileBreakpoint - 1) + "px){.uc-amb-person img{object-position:" + CFG.personPositionMobile + "!important}.uc-amb-slide{touch-action:pan-y}}";
+    document.head.appendChild(st);
+  }
+
+  function init() {
+    var slide = document.querySelector(".uc-amb-slide");
+    var cards = Q(".uc-amb-card");
+    if (!slide || !cards.length) return false;
+    state.slide = slide; state.root = slide.closest(".t-rec") || document;
+    state.cards = cards;
+    if (slide.classList.contains("uc-amb-loop")) CFG.loop = true;
+    injectCss();
+    if (CFG.hideCards) {
+      var recs = [];
+      cards.forEach(function (c) { var r = c.closest(".t-rec"); if (r && recs.indexOf(r) < 0) recs.push(r); });
+      cards.forEach(function (c) { c.classList.add("uc-amb-card--hidden"); });
+      // блок с карточками прячем целиком, если в нём нет ничего кроме карточек
+      recs.forEach(function (r) { if (r !== state.root && !document.body.classList.contains("t-body-editor")) r.style.display = "none"; });
+    }
+    // прогреть изображения
+    cards.forEach(function (c) { var d = readCard(c); [d.bg, d.person].forEach(function (u) { if (u) { var im = new Image(); im.src = u; } }); });
+    bind();
+    go(0, 1, true);
+    lastWidth = window.innerWidth;
+    scheduleReserve();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleReserve);
+    window.addEventListener("load", scheduleReserve);
+    window.ucAmbassadors = {
+      go: function (i) { go(i, i >= state.index ? 1 : -1); }, next: function () { step(1); }, prev: function () { step(-1); },
+      get index() { return state.index; }, get count() { return state.cards.length; }, config: CFG, reserve: reserve,
+      // отладка/тесты: ручной переход с заданным прогрессом (без таймеров)
+      _debug: { begin: function (target, dir) { var t = begin(target, dir); state.tr = t; return t; }, finish: finish, state: state },
+    };
+    return true;
+  }
+
+  function start() {
+    var tries = 0;
+    (function tick() { if (init() || ++tries > 50) return; setTimeout(tick, 100); })();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
+})();
+</script>
