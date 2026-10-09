@@ -1,8 +1,8 @@
 // ZG — сборка Zero Block из спецификации прямо в редакторе Тильды (без локального сервера).
-// Загрузка один раз за вкладку (в окне редактора страницы или Zero):
-//   eval(await (await fetch("https://raw.githubusercontent.com/MiZaRiii/golf-club/main/tilda-kit/zg.js")).text());
+// Загрузка один раз за вкладку (в окне редактора страницы или Zero), URL — где лежит этот файл:
+//   eval(await (await fetch("<URL zg.js>", { cache: "no-store" })).text());
 // Дальше:
-//   ZG.cfg({ family: "Mazzard", weight: "400", color: "#000000", thin: "border-05-bottom" });
+//   ZG.cfg({ family: "Inter", weight: "400", color: "#000000", thin: "" });
 //   const { text, image, shape, group } = ZG;
 //   await ZG.build([ ...корневые узлы ], { artboard, freeGroups, patch, rootAutolayout });
 // Каждое свойство: скаляр или пара [1200, 320]. Сохраняет и публикует человек.
